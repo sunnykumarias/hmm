@@ -46,7 +46,7 @@ jobs:
 
       - name: Run worker
         env:
-          REDIS_URL: ${{ secrets.REDIS_URL }}
-          WORKER_ID: ${{ secrets.WORKER_ID }}
+          WORKER_ID: "github-1"   # badalna ho to yahan badlo (github-2, github-3...)
         run: |
-          python insta_worker.py --worker-id "$WORKER_ID"
+          python insta_worker.py --worker-id "$WORKER_ID"  # redis url script me hardcoded hai
+
