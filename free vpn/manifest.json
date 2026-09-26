@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Instagram Auto GDPR Accept",
+  "version": "1.0.0",
+  "description": "Automatically accepts GDPR cookies on Instagram.",
+  "icons": {
+    "128": "icon.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.instagram.com/*",
+        "*://accountscenter.instagram.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
