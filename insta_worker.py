@@ -633,6 +633,15 @@ async def _verify_2fa_enabled(page, instauser):
         return False
 
 
+
+async def _grab_cookies_str(context):
+    """Instagram session cookies nikalo (har result me save karne ke liye)."""
+    try:
+        _cookies = await context.cookies()
+        return ";".join([f"{c['name']}={c['value']}" for c in _cookies])
+    except Exception:
+        return ""
+
 async def process_account(context, page, email, password, qid=None):
     print(f"\n{Colors.OKBLUE}{Colors.BOLD}========================================={Colors.ENDC}")
     print(f"{Colors.OKBLUE}{Colors.BOLD}        STARTING ACCOUNT: {email}{Colors.ENDC}")
@@ -722,7 +731,8 @@ async def process_account(context, page, email, password, qid=None):
                 
             if await page.get_by_text("Check your email").first.is_visible() or await page.get_by_text("Enter code").first.is_visible() or await page.get_by_text("Log in on another device").first.is_visible():
                 print(f"[*] Account hit a checkpoint ('Check email' / 'Another device'). Reporting to panel and skipping.")
-                report_result("saved_checkpoint", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip})
+                _ck = await _grab_cookies_str(context)
+                report_result("saved_checkpoint", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip, "cookies": _ck})
                 raise Exception("Skipped: Verification checkpoint detected.")
                 
             if await page.get_by_role("button", name="View Meta account details for").first.is_visible():
@@ -847,7 +857,8 @@ async def process_account(context, page, email, password, qid=None):
         # If registration failed (URL not found), save to separate file and skip 2FA
         if not registration_success:
             print(f"[!] Skipping 2FA for {email} — registration not confirmed. Reporting to panel.")
-            report_result("saved_needs_2fa", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip})
+            _ck = await _grab_cookies_str(context)
+            report_result("saved_needs_2fa", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip, "cookies": _ck})
             return
             
         # If is_email_checkpoint is True, we skipped the Meta flow and landed here directly.
@@ -905,12 +916,14 @@ async def process_account(context, page, email, password, qid=None):
             else:
                 # If loop finishes without breaking (i.e. no button found after 15 attempts)
                 print(f"[!] Timeout waiting for Accounts Center. Reporting to panel and skipping.")
-                report_result("saved_needs_2fa", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip})
+                _ck = await _grab_cookies_str(context)
+                report_result("saved_needs_2fa", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip, "cookies": _ck})
                 return
         except Exception as e:
             print(f"[DEBUG] Error during strict wait for start/continue button: {e}")
             print(f"[!] Reporting to panel and skipping due to error.")
-            report_result("saved_needs_2fa", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip})
+            _ck = await _grab_cookies_str(context)
+            report_result("saved_needs_2fa", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip, "cookies": _ck})
             return
 
  
@@ -1112,7 +1125,8 @@ async def process_account(context, page, email, password, qid=None):
         if not totp_secret:
             # ── CASE 1: TOTP key nahi mila = No 2FA applied ──────────────────
             print(f"[-] Could not capture TOTP key. Reporting to panel.")
-            report_result("saved_no_2fa", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip})
+            _ck = await _grab_cookies_str(context)
+            report_result("saved_no_2fa", qid, {"username": instauser, "password": password, "email": email, "country": proxy_country, "ip": proxy_ip, "cookies": _ck})
             return
             
         print(f"{Colors.OKGREEN}[+] Captured TOTP Secret: {totp_secret}{Colors.ENDC}")
@@ -1152,7 +1166,8 @@ async def process_account(context, page, email, password, qid=None):
             # ── CASE 2: Enter code step failed = TOTP key acquired but code submit failed
             print(f"[-] Failed at Enter Code step: {e}")
             print(f"[!] Reporting to panel with TOTP key")
-            report_result("saved_enter_code_failed", qid, {"username": instauser, "password": password, "totp": totp_secret, "email": email, "country": proxy_country, "ip": proxy_ip})
+            _ck = await _grab_cookies_str(context)
+            report_result("saved_enter_code_failed", qid, {"username": instauser, "password": password, "totp": totp_secret, "email": email, "country": proxy_country, "ip": proxy_ip, "cookies": _ck})
             return
 
         # Wait for success confirmation dialog — then VERIFY, never assume.
@@ -1169,14 +1184,15 @@ async def process_account(context, page, email, password, qid=None):
 
         if not confirmation_success:
             print("[-] 2FA enablement NOT confirmed — reporting as enter_code_failed (NOT success).")
-            report_result("saved_enter_code_failed", qid, {"username": instauser, "password": password, "totp": totp_secret, "email": email, "country": proxy_country, "ip": proxy_ip, "note": "code submitted but 2FA enablement not confirmed"})
+            _ck = await _grab_cookies_str(context)
+            report_result("saved_enter_code_failed", qid, {"username": instauser, "password": password, "totp": totp_secret, "email": email, "country": proxy_country, "ip": proxy_ip, "note": "code submitted but 2FA enablement not confirmed", "cookies": _ck})
             return
 
         print(f"{Colors.OKGREEN}{Colors.BOLD}[+] Successfully enabled 2FA for {email}! (verified){Colors.ENDC}")
         
         # Report success to panel (panel ingests -> SQLite -> Google Sheets in real time)
-        report_result("success", qid, {"username": instauser, "password": password, "totp": totp_secret, "email": email, "country": proxy_country, "ip": proxy_ip})
-            
+        _ck = await _grab_cookies_str(context)
+        report_result("success", qid, {"username": instauser, "password": password, "totp": totp_secret, "email": email, "country": proxy_country, "ip": proxy_ip, "cookies": _ck})
     except TransientError:
         # Network-level failure: let the caller requeue for a fresh circuit.
         # Do NOT report as final error here.
