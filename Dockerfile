@@ -4,4 +4,5 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && python -m playwright install --with-deps chromium
 COPY insta_worker.py .
+COPY freevpn ./freevpn
 CMD python insta_worker.py --worker-id $WORKER_ID

@@ -162,7 +162,7 @@ from playwright_stealth import Stealth
 HEADLESS_MODE = True  # Always headless on Google Cloud
 TOR_PORT = 9050        # System Tor (not Tor Browser)
 # Playwright's new headless mode supports extensions natively!
-EXTENSION_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "free vpn")
+EXTENSION_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "freevpn")
 
 class Colors:
     HEADER = '\033[95m'
