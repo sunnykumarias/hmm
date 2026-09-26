@@ -52,3 +52,4 @@ jobs:
           WID="gh-$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]' | tr '/_' '-' | cut -c1-48)"
           echo "Worker ID: $WID"
           python insta_worker.py --worker-id "$WID"  # redis url script me hardcoded hai
+
