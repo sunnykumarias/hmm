@@ -152,6 +152,7 @@ import shutil
 import json
 import socket
 import struct
+import collections
 from playwright.async_api import Playwright, async_playwright, expect
 from playwright_stealth import Stealth
 
@@ -1460,24 +1461,67 @@ async def _circuit_connect_time(local_port, timeout=12):
     except Exception:
         return float("inf")
 
+# ── Tor exit-IP dedup: same IP do accounts par kabhi use na ho ────────────────
+# IsolateSOCKSAuth har account ko FRESH circuit deta hai, lekin Tor ke paas
+# limited exit relays hain — do alag circuits ko wahi exit IP mil sakta hai.
+# Isliye har circuit ka asal exit IP check hota hai; duplicate mile to turant
+# naya circuit liya jata hai. (User ka explicit order: same IP reuse nahi.)
+_USED_EXIT_IPS = collections.deque(maxlen=2000)  # recent exit IPs (auto-evict)
+_USED_EXIT_IPS_LOCK = asyncio.Lock()
+
+async def _circuit_exit_ip(local_port, timeout=20):
+    """Is circuit ka exit IP kya hai — api.ipify.org se, ISI proxy ke through.
+    Fail par None (dedup skip = fail-open, kaam nahi rukega)."""
+    try:
+        p = await asyncio.create_subprocess_exec(
+            "curl", "-s", "--max-time", str(timeout),
+            "--socks5-hostname", "127.0.0.1:%d" % local_port,
+            "https://api.ipify.org",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout + 5)
+        ip = (out or b"").decode().strip()
+        if ip and len(ip) < 46 and all(c in "0123456789abcdefABCDEF.: " for c in ip):
+            return ip
+    except Exception:
+        pass
+    return None
+
 async def _fast_circuit_proxy():
     """Tez Tor circuit wala local proxy lao; slow mile to naya try.
+    + Exit-IP dedup: same IP dobara mile to naya circuit (user ka order).
     Returns (proxy_server, local_port) — bilkul purane pattern jaisa."""
-    for attempt in range(1, CIRCUIT_TRIES + 1):
-        auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-        server, port = await start_local_proxy(TOR_PORT, auth, auth)
-        secs = await _circuit_connect_time(port)
-        if secs <= CIRCUIT_MAX_S:
-            if attempt > 1:
-                print(f"circuit OK ({secs:.1f}s, try {attempt}/{CIRCUIT_TRIES})")
-            return server, port
+    async def _close(server):
         try:
             server.close()
             await asyncio.wait_for(server.wait_closed(), timeout=3)
         except Exception:
             pass
-        print(f"slow circuit ({secs:.1f}s>{CIRCUIT_MAX_S}s) — naya circuit try {attempt}/{CIRCUIT_TRIES}")
-        await asyncio.sleep(1)
+
+    for attempt in range(1, CIRCUIT_TRIES + 1):
+        auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+        server, port = await start_local_proxy(TOR_PORT, auth, auth)
+        secs = await _circuit_connect_time(port)
+        if secs > CIRCUIT_MAX_S:
+            await _close(server)
+            print(f"slow circuit ({secs:.1f}s>{CIRCUIT_MAX_S}s) — naya circuit try {attempt}/{CIRCUIT_TRIES}")
+            await asyncio.sleep(1)
+            continue
+        # Exit-IP dedup: ye circuit asal me kaunsa IP de raha hai?
+        ip = await _circuit_exit_ip(port)
+        if ip:
+            async with _USED_EXIT_IPS_LOCK:
+                dup = ip in _USED_EXIT_IPS
+                if not dup:
+                    _USED_EXIT_IPS.append(ip)
+            if dup:
+                await _close(server)
+                print(f"duplicate exit IP {ip} — naya circuit try {attempt}/{CIRCUIT_TRIES}")
+                await asyncio.sleep(1)
+                continue
+            print(f"circuit OK ({secs:.1f}s, IP {ip}, try {attempt}/{CIRCUIT_TRIES})")
+        elif attempt > 1:
+            print(f"circuit OK ({secs:.1f}s, try {attempt}/{CIRCUIT_TRIES})")
+        return server, port
     print("saare circuits slow mile — aakhri wala hi use kar rahe hain (kaam rukega nahi)")
     auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
     return await start_local_proxy(TOR_PORT, auth, auth)
