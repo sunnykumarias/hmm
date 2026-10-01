@@ -152,7 +152,6 @@ import shutil
 import json
 import socket
 import struct
-import collections
 from playwright.async_api import Playwright, async_playwright, expect
 from playwright_stealth import Stealth
 
@@ -865,80 +864,12 @@ async def process_account(context, page, email, password, qid=None):
             await page.get_by_role("button", name="I agree").click()
             
             print(f"[*] Waiting for registration to complete (URL check)...")
-            registration_success = False
             try:
-                # Smart poll: 180s tak har ~5s me URL dekho (beech ke dialogs bhi handle karo).
-                # Pehle wala blind wait_for_url kabhi-kabhi beech ke screen par atak kar
-                # timeout ho jata tha -> bina wajah saved_needs_2fa.
-                from urllib.parse import urlparse as _urlparse
-                for _poll in range(36):
-                    try:
-                        await page.wait_for_url("**/accounts/registered/**", timeout=5000)
-                        print(f"[*] Registration flow completed.")
-                        registration_success = True
-                        break
-                    except Exception:
-                        pass
-                    try:
-                        cur_url = page.url or ""
-                    except Exception:
-                        cur_url = ""
-                    print(f"[DEBUG] reg-wait ({_poll}): {cur_url[:130]}")
-                    # "Save your login info?" dialog aa jaye to dismiss karo
-                    try:
-                        notnow_btn = page.get_by_role("button", name=re.compile(r"^Not now$", re.IGNORECASE)).first
-                        if await notnow_btn.is_visible(timeout=1000):
-                            await notnow_btn.click()
-                            print(f"[*] Dismissed 'Save login info' dialog.")
-                            await page.wait_for_timeout(2000)
-                            continue
-                    except Exception:
-                        pass
-                    # Seedha instagram.com home par aa gaye aur tika hai = logged in = registered
-                    try:
-                        _pu = _urlparse(cur_url)
-                        _on_home = _pu.netloc.endswith("instagram.com") and _pu.path in ("", "/")
-                    except Exception:
-                        _on_home = False
-                    if _on_home:
-                        await page.wait_for_timeout(3000)
-                        try:
-                            _pu2 = _urlparse(page.url or "")
-                            _still_home = _pu2.netloc.endswith("instagram.com") and _pu2.path in ("", "/")
-                        except Exception:
-                            _still_home = False
-                        if _still_home:
-                            print(f"[*] Landed on Instagram home (stable) — treating as registered.")
-                            registration_success = True
-                            break
-                if not registration_success:
-                    print(f"[-] Registration URL not found (timeout).")
-                    # Fallback: account asal me ban gaya ya nahi? instagram.com par login state dekho.
-                    print(f"[*] Fallback: checking login state on instagram.com...")
-                    try:
-                        await page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=60000)
-                        await page.wait_for_timeout(5000)
-                        fb_url = (page.url or "").lower()
-                        print(f"[DEBUG] fallback url: {fb_url[:130]}")
-                        if "/accounts/login" not in fb_url:
-                            # logged-out landing page par "Log in" button hota hai — wo dikha to logged OUT samjho
-                            login_btn = page.get_by_role("link", name=re.compile(r"^Log in$", re.IGNORECASE)).first
-                            _saw_login_btn = await login_btn.is_visible(timeout=5000)
-                            if _saw_login_btn:
-                                print(f"[-] 'Log in' button visible — not logged in, treating as not registered.")
-                            else:
-                                home_link = page.get_by_role("link", name=re.compile(r"Home", re.IGNORECASE)).first
-                                if await home_link.is_visible(timeout=10000):
-                                    print(f"[*] Logged in (Home visible, no Log in button) — proceeding to 2FA.")
-                                    registration_success = True
-                                else:
-                                    print(f"[-] Home link not visible — treating as not registered.")
-                        else:
-                            print(f"[-] Redirected to login page — not registered.")
-                    except Exception as fe:
-                        print(f"[-] Fallback login check failed: {fe}")
+                await page.wait_for_url("**/accounts/registered/**", timeout=180000)
+                print(f"[*] Registration flow completed.")
+                registration_success = True
             except Exception as url_err:
-                print(f"[-] Registration check error: {url_err}")
+                print(f"[-] Registration URL not found (timeout). Account may not be fully registered.")
                 registration_success = False
                 
         except Exception as e:
@@ -1461,67 +1392,24 @@ async def _circuit_connect_time(local_port, timeout=12):
     except Exception:
         return float("inf")
 
-# ── Tor exit-IP dedup: same IP do accounts par kabhi use na ho ────────────────
-# IsolateSOCKSAuth har account ko FRESH circuit deta hai, lekin Tor ke paas
-# limited exit relays hain — do alag circuits ko wahi exit IP mil sakta hai.
-# Isliye har circuit ka asal exit IP check hota hai; duplicate mile to turant
-# naya circuit liya jata hai. (User ka explicit order: same IP reuse nahi.)
-_USED_EXIT_IPS = collections.deque(maxlen=2000)  # recent exit IPs (auto-evict)
-_USED_EXIT_IPS_LOCK = asyncio.Lock()
-
-async def _circuit_exit_ip(local_port, timeout=20):
-    """Is circuit ka exit IP kya hai — api.ipify.org se, ISI proxy ke through.
-    Fail par None (dedup skip = fail-open, kaam nahi rukega)."""
-    try:
-        p = await asyncio.create_subprocess_exec(
-            "curl", "-s", "--max-time", str(timeout),
-            "--socks5-hostname", "127.0.0.1:%d" % local_port,
-            "https://api.ipify.org",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout + 5)
-        ip = (out or b"").decode().strip()
-        if ip and len(ip) < 46 and all(c in "0123456789abcdefABCDEF.: " for c in ip):
-            return ip
-    except Exception:
-        pass
-    return None
-
 async def _fast_circuit_proxy():
     """Tez Tor circuit wala local proxy lao; slow mile to naya try.
-    + Exit-IP dedup: same IP dobara mile to naya circuit (user ka order).
     Returns (proxy_server, local_port) — bilkul purane pattern jaisa."""
-    async def _close(server):
+    for attempt in range(1, CIRCUIT_TRIES + 1):
+        auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+        server, port = await start_local_proxy(TOR_PORT, auth, auth)
+        secs = await _circuit_connect_time(port)
+        if secs <= CIRCUIT_MAX_S:
+            if attempt > 1:
+                print(f"circuit OK ({secs:.1f}s, try {attempt}/{CIRCUIT_TRIES})")
+            return server, port
         try:
             server.close()
             await asyncio.wait_for(server.wait_closed(), timeout=3)
         except Exception:
             pass
-
-    for attempt in range(1, CIRCUIT_TRIES + 1):
-        auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-        server, port = await start_local_proxy(TOR_PORT, auth, auth)
-        secs = await _circuit_connect_time(port)
-        if secs > CIRCUIT_MAX_S:
-            await _close(server)
-            print(f"slow circuit ({secs:.1f}s>{CIRCUIT_MAX_S}s) — naya circuit try {attempt}/{CIRCUIT_TRIES}")
-            await asyncio.sleep(1)
-            continue
-        # Exit-IP dedup: ye circuit asal me kaunsa IP de raha hai?
-        ip = await _circuit_exit_ip(port)
-        if ip:
-            async with _USED_EXIT_IPS_LOCK:
-                dup = ip in _USED_EXIT_IPS
-                if not dup:
-                    _USED_EXIT_IPS.append(ip)
-            if dup:
-                await _close(server)
-                print(f"duplicate exit IP {ip} — naya circuit try {attempt}/{CIRCUIT_TRIES}")
-                await asyncio.sleep(1)
-                continue
-            print(f"circuit OK ({secs:.1f}s, IP {ip}, try {attempt}/{CIRCUIT_TRIES})")
-        elif attempt > 1:
-            print(f"circuit OK ({secs:.1f}s, try {attempt}/{CIRCUIT_TRIES})")
-        return server, port
+        print(f"slow circuit ({secs:.1f}s>{CIRCUIT_MAX_S}s) — naya circuit try {attempt}/{CIRCUIT_TRIES}")
+        await asyncio.sleep(1)
     print("saare circuits slow mile — aakhri wala hi use kar rahe hain (kaam rukega nahi)")
     auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
     return await start_local_proxy(TOR_PORT, auth, auth)
@@ -1756,15 +1644,7 @@ Log notice stdout
         )
         proc.communicate(torrc_content.encode())
 
-    # ── 3. Tor pehle se chal raha hai to restart mat karo ───────────────────
-    try:
-        _ts = socket.create_connection(("127.0.0.1", 9050), timeout=2)
-        _ts.close()
-        print(f"{Colors.OKGREEN}[+] Tor pehle se chal raha hai (port 9050) — restart skip.{Colors.ENDC}")
-        return
-    except (ConnectionRefusedError, OSError):
-        pass
-
+    # ── 3. Stop any existing Tor, then start fresh ───────────────────────
     print(f"{Colors.OKCYAN}[*] Starting Tor service...{Colors.ENDC}")
     subprocess.run(["sudo", "service", "tor", "stop"],  capture_output=True)
     subprocess.run(["sudo", "service", "tor", "start"], check=True)
