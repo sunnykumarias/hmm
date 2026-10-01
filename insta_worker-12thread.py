@@ -864,12 +864,80 @@ async def process_account(context, page, email, password, qid=None):
             await page.get_by_role("button", name="I agree").click()
             
             print(f"[*] Waiting for registration to complete (URL check)...")
+            registration_success = False
             try:
-                await page.wait_for_url("**/accounts/registered/**", timeout=180000)
-                print(f"[*] Registration flow completed.")
-                registration_success = True
+                # Smart poll: 180s tak har ~5s me URL dekho (beech ke dialogs bhi handle karo).
+                # Pehle wala blind wait_for_url kabhi-kabhi beech ke screen par atak kar
+                # timeout ho jata tha -> bina wajah saved_needs_2fa.
+                from urllib.parse import urlparse as _urlparse
+                for _poll in range(36):
+                    try:
+                        await page.wait_for_url("**/accounts/registered/**", timeout=5000)
+                        print(f"[*] Registration flow completed.")
+                        registration_success = True
+                        break
+                    except Exception:
+                        pass
+                    try:
+                        cur_url = page.url or ""
+                    except Exception:
+                        cur_url = ""
+                    print(f"[DEBUG] reg-wait ({_poll}): {cur_url[:130]}")
+                    # "Save your login info?" dialog aa jaye to dismiss karo
+                    try:
+                        notnow_btn = page.get_by_role("button", name=re.compile(r"^Not now$", re.IGNORECASE)).first
+                        if await notnow_btn.is_visible(timeout=1000):
+                            await notnow_btn.click()
+                            print(f"[*] Dismissed 'Save login info' dialog.")
+                            await page.wait_for_timeout(2000)
+                            continue
+                    except Exception:
+                        pass
+                    # Seedha instagram.com home par aa gaye aur tika hai = logged in = registered
+                    try:
+                        _pu = _urlparse(cur_url)
+                        _on_home = _pu.netloc.endswith("instagram.com") and _pu.path in ("", "/")
+                    except Exception:
+                        _on_home = False
+                    if _on_home:
+                        await page.wait_for_timeout(3000)
+                        try:
+                            _pu2 = _urlparse(page.url or "")
+                            _still_home = _pu2.netloc.endswith("instagram.com") and _pu2.path in ("", "/")
+                        except Exception:
+                            _still_home = False
+                        if _still_home:
+                            print(f"[*] Landed on Instagram home (stable) — treating as registered.")
+                            registration_success = True
+                            break
+                if not registration_success:
+                    print(f"[-] Registration URL not found (timeout).")
+                    # Fallback: account asal me ban gaya ya nahi? instagram.com par login state dekho.
+                    print(f"[*] Fallback: checking login state on instagram.com...")
+                    try:
+                        await page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=60000)
+                        await page.wait_for_timeout(5000)
+                        fb_url = (page.url or "").lower()
+                        print(f"[DEBUG] fallback url: {fb_url[:130]}")
+                        if "/accounts/login" not in fb_url:
+                            # logged-out landing page par "Log in" button hota hai — wo dikha to logged OUT samjho
+                            login_btn = page.get_by_role("link", name=re.compile(r"^Log in$", re.IGNORECASE)).first
+                            _saw_login_btn = await login_btn.is_visible(timeout=5000)
+                            if _saw_login_btn:
+                                print(f"[-] 'Log in' button visible — not logged in, treating as not registered.")
+                            else:
+                                home_link = page.get_by_role("link", name=re.compile(r"Home", re.IGNORECASE)).first
+                                if await home_link.is_visible(timeout=10000):
+                                    print(f"[*] Logged in (Home visible, no Log in button) — proceeding to 2FA.")
+                                    registration_success = True
+                                else:
+                                    print(f"[-] Home link not visible — treating as not registered.")
+                        else:
+                            print(f"[-] Redirected to login page — not registered.")
+                    except Exception as fe:
+                        print(f"[-] Fallback login check failed: {fe}")
             except Exception as url_err:
-                print(f"[-] Registration URL not found (timeout). Account may not be fully registered.")
+                print(f"[-] Registration check error: {url_err}")
                 registration_success = False
                 
         except Exception as e:
