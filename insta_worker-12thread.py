@@ -1756,7 +1756,15 @@ Log notice stdout
         )
         proc.communicate(torrc_content.encode())
 
-    # ── 3. Stop any existing Tor, then start fresh ───────────────────────
+    # ── 3. Tor pehle se chal raha hai to restart mat karo ───────────────────
+    try:
+        _ts = socket.create_connection(("127.0.0.1", 9050), timeout=2)
+        _ts.close()
+        print(f"{Colors.OKGREEN}[+] Tor pehle se chal raha hai (port 9050) — restart skip.{Colors.ENDC}")
+        return
+    except (ConnectionRefusedError, OSError):
+        pass
+
     print(f"{Colors.OKCYAN}[*] Starting Tor service...{Colors.ENDC}")
     subprocess.run(["sudo", "service", "tor", "stop"],  capture_output=True)
     subprocess.run(["sudo", "service", "tor", "start"], check=True)
