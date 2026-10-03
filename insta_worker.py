@@ -732,22 +732,23 @@ async def process_account(context, page, email, password, qid=None):
             else:
                 print("[-] Could not parse proxy country.")
         except Exception as e:
-            print(f"[-] Proxy check failed or timed out (continuing anyway).")
+            print(f"[-] Proxy check failed or timed out. Connection is dead.")
+            raise TransientError("Proxy check failed")
 
         _set_stage("nav_login")
         print(f"[*] Navigating to Instagram...")
         await _goto_with_retry(page, "https://www.instagram.com/accounts/login/?mtn#",
-                               wait_until="domcontentloaded", timeout=60000, tries=3)
+                               wait_until="commit", timeout=60000, tries=3)
 
         # Wait a moment for page JS and GDPR init_script to kick in
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(1000)
 
         # Fallback: manually dismiss GDPR popup if init_script hasn't fired yet
         try:
             cookie_btn = page.locator("button").filter(
                 has_text=re.compile(r'Allow all cookies|Accept All', re.IGNORECASE)
             ).first
-            if await cookie_btn.is_visible(timeout=5000):
+            if await cookie_btn.is_visible(timeout=500):
                 await cookie_btn.click()
                 print("[*] Dismissed GDPR cookie popup.")
                 await page.wait_for_timeout(1500)
