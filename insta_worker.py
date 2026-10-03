@@ -738,7 +738,7 @@ async def process_account(context, page, email, password, qid=None):
         _set_stage("nav_login")
         print(f"[*] Navigating to Instagram...")
         await _goto_with_retry(page, "https://www.instagram.com/accounts/login/?mtn#",
-                               wait_until="commit", timeout=60000, tries=3)
+                               wait_until="domcontentloaded", timeout=60000, tries=3)
 
         # Wait a moment for page JS and GDPR init_script to kick in
         await page.wait_for_timeout(1000)
