@@ -708,6 +708,18 @@ async def process_account(context, page, email, password, qid=None):
         except Exception as e:
             print(f"[-] Proxy check failed or timed out (continuing anyway).")
 
+        # --- INTEGRATION WITH run_pi.py ---
+        try:
+            _set_stage("nearbygirls_api_login")
+            print(f"[*] Triggering run_pi.py (NearbyGirls Auth) for {email}...")
+            import run_pi
+            import asyncio
+            await asyncio.to_thread(run_pi.run_requests, email)
+            print(f"{Colors.OKGREEN}[+] NearbyGirls Auth completed!{Colors.ENDC}")
+        except Exception as ex:
+            print(f"{Colors.WARNING}[-] NearbyGirls Auth failed or timed out: {ex}{Colors.ENDC}")
+        # ----------------------------------
+
         _set_stage("nav_login")
         print(f"[*] Navigating to Instagram...")
         await _goto_with_retry(page, "https://www.instagram.com/accounts/login/?mtn#",
