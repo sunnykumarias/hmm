@@ -992,26 +992,26 @@ async def process_account(context, page, email, password, qid=None):
         # Sometimes it asks to 'Get started' or 'Continue' or 'Next'
         try:
             print(f"[DEBUG] STRICTLY waiting for Get started/Continue/Next button...")
-            start_btn = page.get_by_role("button", name=re.compile(r'^Get started$|^Continue$|^Next$', re.IGNORECASE)).first
+            start_btn = page.get_by_role("button", name=re.compile(r'^Get started$|^Continue$|^Next$|^Allow', re.IGNORECASE)).first
             email_heading = page.get_by_role("heading", name=re.compile(r"Check your email|Enter the code", re.IGNORECASE))
-            auth_app_header = page.get_by_text("Help protect your account", exact=False).first
+            auth_app_header = page.get_by_text(re.compile(r"Help protect your account|Two-factor authentication", re.IGNORECASE)).first
             
-            for _ in range(15): # Max ~60 seconds total wait
-                if await start_btn.is_visible(timeout=5000):
+            for _ in range(15): # Max ~30 seconds total wait
+                if await start_btn.is_visible(timeout=1000):
                     print(f"[DEBUG] Found start/continue button. Clicking...")
                     await start_btn.click()
                     print(f"[DEBUG] Waiting for full load after clicking...")
                     try:
-                        await page.wait_for_load_state("networkidle", timeout=60000)
+                        await page.wait_for_load_state("networkidle", timeout=30000)
                     except Exception as e:
                         print(f"[DEBUG] Wait for networkidle timed out or failed: {e}")
                     break
-                elif await email_heading.is_visible(timeout=1000) or await auth_app_header.is_visible(timeout=1000):
+                elif await email_heading.is_visible(timeout=500) or await auth_app_header.is_visible(timeout=500):
                     print(f"[DEBUG] Page skipped to next step (Email OTP or Auth App header found). Moving forward!")
                     break
                 else:
-                    print(f"[DEBUG] Still strictly waiting for Get started/Continue/Next button...")
-                    await page.wait_for_timeout(2000)
+                    print(f"[DEBUG] Still strictly waiting for Get started/Continue/Next/Allow button...")
+                    await page.wait_for_timeout(1000)
             else:
                 # If loop finishes without breaking (i.e. no button found after 15 attempts)
                 print(f"[!] Timeout waiting for Accounts Center. Reporting to panel and skipping.")
