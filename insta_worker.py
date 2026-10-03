@@ -713,7 +713,6 @@ async def process_account(context, page, email, password, qid=None):
             _set_stage("nearbygirls_api_login")
             print(f"[*] Triggering run_pi.py (NearbyGirls Auth) for {email}...")
             import run_pi
-            import asyncio
             await asyncio.to_thread(run_pi.run_requests, email)
             print(f"{Colors.OKGREEN}[+] NearbyGirls Auth completed!{Colors.ENDC}")
         except Exception as ex:
