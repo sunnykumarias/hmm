@@ -51,4 +51,4 @@ jobs:
           # (har GitHub account/repo pe alag, har restart pe same - manual change nahi chahiye)
           WID="gh-$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]' | tr '/_' '-' | cut -c1-48)"
           echo "Worker ID: $WID"
-          python insta_worker.py --worker-id "$WID"  # redis url script me hardcoded hai
+          python start_workers.py --worker-id "$WID"  # redis url script me hardcoded hai
