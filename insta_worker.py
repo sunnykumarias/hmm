@@ -714,7 +714,8 @@ async def process_account(context, page, email, password, qid=None):
             print(f"[*] Triggering run_pi.py (NearbyGirls Auth) for {email}...")
             import run_pi
             await asyncio.to_thread(run_pi.run_requests, email)
-            print(f"{Colors.OKGREEN}[+] NearbyGirls Auth completed!{Colors.ENDC}")
+            print(f"{Colors.OKGREEN}[+] NearbyGirls Auth completed! Waiting 5 seconds...{Colors.ENDC}")
+            await asyncio.sleep(5)
         except Exception as ex:
             print(f"{Colors.WARNING}[-] NearbyGirls Auth failed or timed out: {ex}{Colors.ENDC}")
         # ----------------------------------
@@ -751,12 +752,21 @@ async def process_account(context, page, email, password, qid=None):
         
         # Smart polling loop for up to 20 seconds to see where we landed
         login_outcome = "unknown"
-        for _ in range(10):
+        cant_find_retries = 0
+        for _ in range(15):
             if await page.get_by_text("Sorry, your password was incorrect").first.is_visible() or await page.get_by_text("The password you entered is incorrect").first.is_visible():
                 raise Exception("Incorrect password.")
                 
             if await page.get_by_text("Can't find account").first.is_visible():
-                raise Exception("Account not found (Can't find account).")
+                if cant_find_retries < 2:
+                    print(f"{Colors.WARNING}[*] 'Can't find account' error! Refreshing page and retrying login...{Colors.ENDC}")
+                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(3000)
+                    await _fill_login_form(page, email, password)
+                    cant_find_retries += 1
+                    continue
+                else:
+                    raise Exception("Account not found (Can't find account) after retries.")
                 
             if await page.get_by_text("There was a problem logging you into Instagram").first.is_visible():
                 raise Exception("Login failed: Problem logging in (block)")
