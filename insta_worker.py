@@ -244,10 +244,36 @@ def fetch_otp(email_addr, seen_ids=None, max_retries=30):
         time.sleep(4)
     return None
 
-def generate_random_name():
-    first_names = ["Rahul", "Sonali", "Priya", "Amit", "Neha", "Vikram", "Anjali", "Rohan", "Sneha", "Karan", "Pooja", "Arjun", "Kavya", "Aditya", "Riya"]
-    last_names = ["Kumar", "Kumari", "Sharma", "Singh", "Verma", "Gupta", "Das", "Patel", "Reddy", "Mehta", "Jain", "Bose"]
-    return f"{random.choice(first_names)} {random.choice(last_names)}"
+def generate_random_name(country_str=None):
+    try:
+        from faker import Faker
+        locale = 'en_US'
+        if country_str:
+            c = country_str.lower()
+            if 'germany' in c: locale = 'de_DE'
+            elif 'netherlands' in c: locale = 'nl_NL'
+            elif 'france' in c: locale = 'fr_FR'
+            elif 'spain' in c: locale = 'es_ES'
+            elif 'italy' in c: locale = 'it_IT'
+            elif 'india' in c: locale = 'en_IN'
+            elif 'united kingdom' in c or 'uk' in c: locale = 'en_GB'
+            elif 'canada' in c: locale = 'en_CA'
+            elif 'australia' in c: locale = 'en_AU'
+            elif 'brazil' in c: locale = 'pt_BR'
+            elif 'mexico' in c: locale = 'es_MX'
+            elif 'russia' in c: locale = 'ru_RU'
+            elif 'japan' in c: locale = 'ja_JP'
+            else:
+                locale = random.choice(['en_US', 'en_GB', 'de_DE', 'fr_FR', 'it_IT', 'es_ES', 'nl_NL'])
+        else:
+            locale = random.choice(['en_US', 'en_GB', 'de_DE', 'fr_FR', 'it_IT', 'es_ES', 'nl_NL', 'en_IN'])
+            
+        fake = Faker(locale)
+        return fake.name()
+    except Exception:
+        first_names = ["Rahul", "Sonali", "Priya", "Amit", "Neha", "Vikram", "Anjali", "Rohan", "Sneha", "Karan", "Pooja", "Arjun", "Kavya", "Aditya", "Riya", "John", "Emma", "Michael", "Sophia", "David"]
+        last_names = ["Kumar", "Kumari", "Sharma", "Singh", "Verma", "Gupta", "Das", "Patel", "Reddy", "Mehta", "Jain", "Bose", "Smith", "Johnson", "Williams", "Brown", "Jones"]
+        return f"{random.choice(first_names)} {random.choice(last_names)}"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -708,18 +734,6 @@ async def process_account(context, page, email, password, qid=None):
         except Exception as e:
             print(f"[-] Proxy check failed or timed out (continuing anyway).")
 
-        # --- INTEGRATION WITH run_pi.py ---
-        try:
-            _set_stage("nearbygirls_api_login")
-            print(f"[*] Triggering run_pi.py (NearbyGirls Auth) for {email}...")
-            import run_pi
-            await asyncio.to_thread(run_pi.run_requests, email)
-            print(f"{Colors.OKGREEN}[+] NearbyGirls Auth completed! Waiting 5 seconds...{Colors.ENDC}")
-            await asyncio.sleep(5)
-        except Exception as ex:
-            print(f"{Colors.WARNING}[-] NearbyGirls Auth failed or timed out: {ex}{Colors.ENDC}")
-        # ----------------------------------
-
         _set_stage("nav_login")
         print(f"[*] Navigating to Instagram...")
         await _goto_with_retry(page, "https://www.instagram.com/accounts/login/?mtn#",
@@ -752,21 +766,55 @@ async def process_account(context, page, email, password, qid=None):
         
         # Smart polling loop for up to 20 seconds to see where we landed
         login_outcome = "unknown"
-        cant_find_retries = 0
-        for _ in range(15):
+        for _ in range(10):
             if await page.get_by_text("Sorry, your password was incorrect").first.is_visible() or await page.get_by_text("The password you entered is incorrect").first.is_visible():
                 raise Exception("Incorrect password.")
                 
             if await page.get_by_text("Can't find account").first.is_visible():
-                if cant_find_retries < 2:
-                    print(f"{Colors.WARNING}[*] 'Can't find account' error! Refreshing page and retrying login...{Colors.ENDC}")
-                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                print(f"{Colors.WARNING}[*] 'Can't find account' error! Testing alternative auth.meta.com flow...{Colors.ENDC}")
+                try:
+                    await page.goto("https://auth.meta.com/", wait_until="domcontentloaded", timeout=60000)
                     await page.wait_for_timeout(3000)
+                    
+                    print("[*] Clicking 'Use mobile number or email address'...")
+                    await page.locator("div[role='button']").filter(has_text=re.compile(r"(email|mobile|phone)", re.IGNORECASE)).first.click(timeout=15000)
+                    await page.wait_for_timeout(2000)
+                    
+                    print("[*] Entering email...")
+                    input_locator = page.locator('input').first
+                    await input_locator.wait_for(timeout=15000)
+                    await input_locator.fill(email)
+                    
+                    print("[*] Clicking Next/Continue...")
+                    next_btn = page.locator('div[role="button"]:has-text("Continue"), div[role="button"]:has-text("Next"), button:has-text("Continue"), button:has-text("Next")').first
+                    await next_btn.click()
+                    
+                    print(f"[*] Fetching OTP for {email}...")
+                    await page.wait_for_timeout(5000)
+                    otp = await asyncio.to_thread(fetch_otp, email, seen_ids, 30)
+                    if not otp:
+                        raise Exception("Failed to fetch OTP.")
+                        
+                    print(f"[+] Received OTP: {otp}")
+                    
+                    print("[*] Entering OTP...")
+                    otp_input = page.locator('input').first
+                    await otp_input.wait_for(timeout=15000)
+                    await otp_input.fill(otp)
+                    
+                    print("[*] Submitting OTP...")
+                    await next_btn.click()
+                    await page.wait_for_timeout(5000)
+                    
+                    print("[*] Returning to Instagram login...")
+                    await _goto_with_retry(page, "https://www.instagram.com/accounts/login/?mtn#", wait_until="domcontentloaded", timeout=60000, tries=3)
+                    await page.wait_for_timeout(3000)
+                    
                     await _fill_login_form(page, email, password)
-                    cant_find_retries += 1
                     continue
-                else:
-                    raise Exception("Account not found (Can't find account) after retries.")
+                except Exception as ex:
+                    print(f"{Colors.FAIL}[-] auth.meta.com fallback failed: {ex}. Relaunching normally.{Colors.ENDC}")
+                    raise TransientError("Can't find account block (shadow-ban) + auth.meta.com fallback failed")
                 
             if await page.get_by_text("There was a problem logging you into Instagram").first.is_visible():
                 raise Exception("Login failed: Problem logging in (block)")
@@ -833,8 +881,8 @@ async def process_account(context, page, email, password, qid=None):
             await btn_meta.click()
             
             # Setup Full Name
-            full_name = generate_random_name()
-            print(f"[*] Setting Full Name: {full_name}")
+            full_name = generate_random_name(proxy_country)
+            print(f"[*] Setting Full Name: {full_name} (Country base: {proxy_country or 'Random'})")
             await expect(page.get_by_role("textbox", name="Full name")).to_be_visible(timeout=30000)
             await page.get_by_role("textbox", name="Full name").fill(full_name)
             await page.get_by_role("button", name="Next").click()
@@ -884,14 +932,17 @@ async def process_account(context, page, email, password, qid=None):
             await expect(page.get_by_label("Agree to Instagram's terms")).to_be_visible(timeout=30000)
             await page.get_by_role("button", name="I agree").click()
             
-            print(f"[*] Waiting for registration to complete (URL check)...")
+            print(f"[*] Waiting for registration to complete (URL check max 40s)...")
             try:
-                await page.wait_for_url("**/accounts/registered/**", timeout=180000)
+                await page.wait_for_url("**/accounts/registered/**", timeout=40000)
                 print(f"[*] Registration flow completed.")
                 registration_success = True
             except Exception as url_err:
-                print(f"[-] Registration URL not found (timeout). Account may not be fully registered.")
-                registration_success = False
+                print(f"{Colors.WARNING}[-] Registration URL not found (timeout). Relaunching with fresh IP and User-Agent...{Colors.ENDC}")
+                raise TransientError("Registration URL timeout - requeuing with fresh fingerprint")
+                
+        except TransientError:
+            raise  # Re-raise to ensure the worker restarts the session
                 
         except Exception as e:
             # Don't mask real setup failures as "already registered".
@@ -1470,10 +1521,25 @@ async def run(playwright: Playwright) -> None:
             proxy_server, local_port = await _fast_circuit_proxy()
             tor_proxy = {"server": f"socks5://127.0.0.1:{local_port}"}
 
+            # Random Mobile User-Agents to prevent fingerprinting
+            user_agents = [
+                "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 14; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 12; M2101K6G) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 13; CPH2449) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 13; V2227A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 14; SM-F946B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 11; Redmi Note 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 12; OnePlus 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 13; POCO X3 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36"
+            ]
+            import random
+            selected_user_agent = random.choice(user_agents)
+
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir,
                 headless=False, # Must be False for extensions; --headless=new in args overrides this cleanly
-                user_agent="Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+                user_agent=selected_user_agent,
                 viewport={'width': 412, 'height': 915},
                 is_mobile=True,
                 has_touch=True,
