@@ -330,6 +330,15 @@ def _r():
 def _fleet_threads():
     if _APARGS.threads:
         return max(1, min(50, _APARGS.threads))
+    try:
+        v = _r().get("fleet:default_threads")
+        if v:
+            return max(1, min(50, int(v)))
+        v = _r().get("threads:" + WORKER_ID)
+        if v:
+            return max(1, min(50, int(v)))
+    except Exception:
+        pass
     return 2 # Run with 1 thread by default for local accounts.txt
 
 WORKER_THREADS = _fleet_threads()
