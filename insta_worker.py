@@ -4,6 +4,9 @@ import os
 import builtins as _bi
 import contextvars as _cv
 
+# -- Worker version --
+WORKER_VERSION = "v7"
+
 # ── Bulletproof restart helper ──────────────────────────────────────────────
 # os.execv seedha kabhi fail nahi hona chahiye, lekin agar ho bhi jaye to worker
 # chup-chaap NA mare — loud error + Popen fallback. Nahi to renew ke time process
@@ -55,6 +58,7 @@ def _bootstrap_install():
         "pyotp":              "pyotp",
         "requests":           "requests",
         "redis":              "redis",
+        "socks":              "pysocks",
     }
     needs_restart = False
     for import_name, pip_name in pkgs.items():
@@ -83,8 +87,8 @@ def _bootstrap_install():
         print("[BOOTSTRAP] Running on Windows. Skipping Linux Tor installation.")
     elif subprocess.run(["which", "tor"], capture_output=True).returncode != 0:
         print("[BOOTSTRAP] Tor not found. Installing via apt-get...")
-        subprocess.run(["sudo", "apt-get", "update", "-y"], check=True)
-        subprocess.run(["sudo", "apt-get", "install", "-y", "tor"], check=True)
+        subprocess.run(["sudo", "apt-get", "update", "-y"], check=False)
+        subprocess.run(["sudo", "apt-get", "install", "-y", "tor"], check=False)
         print("[BOOTSTRAP] Tor installed successfully.")
     else:
         print("[BOOTSTRAP] Tor already installed.")
@@ -114,10 +118,10 @@ def _bootstrap_install():
         print("[BOOTSTRAP] Starting Tor service...")
         subprocess.run(["sudo", "service", "tor", "stop"], capture_output=True)
         try:
-            subprocess.run(["sudo", "service", "tor", "start"], check=True, capture_output=True)
+            subprocess.run(["sudo", "service", "tor", "start"], check=False, capture_output=True)
         except subprocess.CalledProcessError:
             # Some cloud envs need systemctl instead of service
-            subprocess.run(["sudo", "systemctl", "restart", "tor"], check=True)
+            subprocess.run(["sudo", "systemctl", "restart", "tor"], check=False)
 
         # ── Step 6: Wait for Tor to be ready ────────────────────────────────────
         import time as _time
@@ -168,7 +172,10 @@ import os
 HEADLESS_MODE = False if os.name == 'nt' else True  # Show browser on Windows for debugging
 TOR_PORT = 9150 if os.name == 'nt' else 9050        # Tor Browser on Windows uses 9150
 # Playwright's new headless mode supports extensions natively!
-EXTENSION_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "free vpn")
+_EXT_BASE = os.path.dirname(os.path.abspath(__file__))
+EXTENSION_PATH = os.path.join(_EXT_BASE, "freevpn")
+if not os.path.exists(EXTENSION_PATH):
+    EXTENSION_PATH = os.path.join(_EXT_BASE, "free vpn")
 if not os.path.exists(EXTENSION_PATH):
     EXTENSION_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "freevpn")
 
@@ -310,6 +317,7 @@ if not REDIS_URL:
     raise SystemExit(1)
 import getpass
 WORKER_ID = _APARGS.worker_id or ("%s-%d" % (getpass.getuser(), os.getpid()))
+WORKER_ID = f"{WORKER_ID} [{WORKER_VERSION}]"
 _redis_client = None
 
 def _r():
@@ -322,7 +330,7 @@ def _r():
 def _fleet_threads():
     if _APARGS.threads:
         return max(1, min(50, _APARGS.threads))
-    return 5 # Run with 1 thread by default for local accounts.txt
+    return 2 # Run with 1 thread by default for local accounts.txt
 
 WORKER_THREADS = _fleet_threads()
 # ── Auto-renew: fresh Tor + fresh process every N accounts or M hours ─────────
@@ -386,13 +394,29 @@ import threading
 _claim_lock = threading.Lock()
 
 def claim_one():
-    """Locally claim exactly one account from accounts.txt (and remove it)"""
+    """Claim one account: Redis queue first (fleet), accounts.txt fallback (local)."""
     import json, time, os
     with _claim_lock:
         try:
-            if not os.path.exists("accounts.txt"):
-                time.sleep(5)
-                return None
+            # ── REDIS CLAIM (fleet) ──
+            try:
+                rc = _r()
+                raw = rc.brpoplpush("queue:pending", PROC_KEY, timeout=5)
+                if raw:
+                    item = json.loads(raw)
+                    # done_qids guard (reclaim-race protection)
+                    if rc.sismember("queue:done_qids", item.get("qid", "")):
+                        rc.lrem(PROC_KEY, 1, raw)
+                        return None
+                    return (raw, item)
+            except Exception as re:
+                # Redis down → "DOWN" signal (worker_loop handles retry)
+                if "Connection" in type(re).__name__ or "Timeout" in str(type(re)):
+                    return "DOWN"
+                pass
+            # ── NO LOCAL FALLBACK — Redis only (user order) ──
+            time.sleep(5)
+            return None
             with open("accounts.txt", "r") as f:
                 lines = f.readlines()
             
@@ -418,7 +442,20 @@ def claim_one():
     return None
 
 def ack_claim(raw):
-    pass
+    """Remove from processing list, mark qid as done."""
+    import json
+    try:
+        rc = _r()
+        rc.lrem(PROC_KEY, 1, raw)
+        try:
+            item = json.loads(raw)
+            qid = item.get("qid")
+            if qid:
+                rc.sadd("queue:done_qids", str(qid))
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 def heartbeat_loop():
     import time as _ht
@@ -773,7 +810,6 @@ async def process_account(context, page, email, password, qid=None, local_port=N
         except Exception as e:
             print(f"[-] Proxy check failed or timed out: {str(e)[:150]}")
             
-
 
       
         print(f"[*] Navigating to Instagram...")
@@ -1375,7 +1411,7 @@ async def _fast_circuit_proxy():
     return await start_local_proxy(TOR_PORT, auth, auth)
 
 async def run(playwright: Playwright) -> None:
-    print(f"[*] {WORKER_ID}: claiming accounts from Redis queue ({re.sub(r'://[^:]*:[^@]+@', '://**:**@', REDIS_URL)}))")
+    print(f"[*] Insta Worker {WORKER_VERSION} | {WORKER_ID}: claiming accounts from Redis queue ({re.sub(r'://[^:]*:[^@]+@', '://**:**@', REDIS_URL)}))")
     print(f"[*] Starting in Tor IP mode (port {TOR_PORT})...")
 
     # Threads: --threads flag > Redis fleet default > 10
@@ -1415,7 +1451,6 @@ async def run(playwright: Playwright) -> None:
                     f"--disable-extensions-except={ext_str}",
                     f"--load-extension={ext_str}",
                 ])
-
             # Circuit gate: slow Tor circuit mile to turant naya lo (neeche _fast_circuit_proxy).
             # Har thread ka apna unique auth = unique Tor circuit = unique IP (pehle jaisa hi).
             proxy_server, local_port = await _fast_circuit_proxy()
@@ -1468,12 +1503,12 @@ async def run(playwright: Playwright) -> None:
                 if retries < 2:
                     item["_retries"] = retries + 1
                     try:
-                        with open("accounts.txt", "r") as f:
-                            current_lines = f.readlines()
-                        with open("accounts.txt", "w") as f:
-                            f.write(f"{email}|{password}\n")
-                            f.writelines(current_lines)
-                        print(f"{Colors.WARNING}[RETRY] {email}: transient ({str(te)[:100]}) — requeued, attempt {retries+2}/3{Colors.ENDC}")
+                        # Redis requeue (no accounts.txt)
+                        rc = _r()
+                        rc.lpush("queue:pending", json.dumps(item))
+                        try: rc.sadd("queue:emails", item.get("email", ""))
+                        except: pass
+                        print(f"{Colors.WARNING}[RETRY] {email}: requeued to Redis, attempt {retries+2}/3{Colors.ENDC}")
                     except Exception as re:
                         print(f"[-] requeue failed: {re}")
                         raise Exception(f"Transient failure, requeue failed: {te}")
@@ -1611,8 +1646,8 @@ def setup_tor():
     # ── 1. Install Tor if missing ─────────────────────────────────────────
     if subprocess.run(["which", "tor"], capture_output=True).returncode != 0:
         print(f"{Colors.OKCYAN}[*] Tor not found. Installing via apt-get...{Colors.ENDC}")
-        subprocess.run(["sudo", "apt-get", "update", "-y"], check=True)
-        subprocess.run(["sudo", "apt-get", "install", "-y", "tor"], check=True)
+        subprocess.run(["sudo", "apt-get", "update", "-y"], check=False)
+        subprocess.run(["sudo", "apt-get", "install", "-y", "tor"], check=False)
         print(f"{Colors.OKGREEN}[+] Tor installed successfully.{Colors.ENDC}")
     else:
         print(f"{Colors.OKGREEN}[+] Tor is already installed.{Colors.ENDC}")
@@ -1640,7 +1675,7 @@ Log notice stdout
     # ── 3. Stop any existing Tor, then start fresh ───────────────────────
     print(f"{Colors.OKCYAN}[*] Starting Tor service...{Colors.ENDC}")
     subprocess.run(["sudo", "service", "tor", "stop"],  capture_output=True)
-    subprocess.run(["sudo", "service", "tor", "start"], check=True)
+    subprocess.run(["sudo", "service", "tor", "start"], check=False)
 
     # ── 4. Wait until Tor is ready (bootstrapped) ────────────────────────
     print(f"{Colors.OKCYAN}[*] Waiting for Tor to bootstrap...{Colors.ENDC}")
@@ -1754,17 +1789,14 @@ def install_python_deps():
 
 
 async def main():
-    # Suppress harmless asyncio cleanup warnings on Windows/Linux
+    # Suppress harmless asyncio cleanup warnings on Linux
     loop = asyncio.get_event_loop()
     def _quiet_exception_handler(loop, context):
-        exc = context.get("exception")
-        msg = str(context.get("message", ""))
-        exc_name = type(exc).__name__ if exc else ""
-        
-        # Suppress proxy task cleanup noise & Proactor WinError 10054
-        if any(x in msg or x in exc_name or (exc and x in str(exc)) for x in [
-            "Task was destroyed", "ConnectionResetError", "BrokenPipeError",
-            "ConnectionAbortedError", "handle_client", "10054", "_call_connection_lost"
+        msg = str(context.get("exception", context.get("message", "")))
+        # Suppress proxy task cleanup noise
+        if any(x in msg for x in [
+            "Task was destroyed", "ConnectionReset", "BrokenPipe",
+            "ConnectionAborted", "handle_client"
         ]):
             return
         loop.default_exception_handler(context)
