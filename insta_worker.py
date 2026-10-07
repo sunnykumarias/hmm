@@ -5,7 +5,7 @@ import builtins as _bi
 import contextvars as _cv
 
 # -- Worker version --
-WORKER_VERSION = "v7.1"
+WORKER_VERSION = "v7.2"
 
 # ── Bulletproof restart helper ──────────────────────────────────────────────
 # os.execv seedha kabhi fail nahi hona chahiye, lekin agar ho bhi jaye to worker
@@ -762,7 +762,7 @@ async def _grab_cookies_str(context):
     except Exception:
         return ""
 
-async def process_account(context, page, email, password, qid=None, local_port=None):
+async def process_account(context, page, email, password, qid=None, local_port=None, proxy_info=None):
     print(f"\n{Colors.OKBLUE}{Colors.BOLD}========================================={Colors.ENDC}")
     print(f"{Colors.OKBLUE}{Colors.BOLD}        STARTING ACCOUNT: {email}{Colors.ENDC}")
     print(f"{Colors.OKBLUE}{Colors.BOLD}========================================={Colors.ENDC}")
@@ -789,35 +789,41 @@ async def process_account(context, page, email, password, qid=None, local_port=N
     try:
         _set_stage("proxy_check")
         print("[*] Checking proxy connection and country...")
-        try:
-            import requests
-            chk_proxies = None
-            if local_port:
-                chk_proxies = {
-                    "http": f"socks5h://127.0.0.1:{local_port}",
-                    "https": f"socks5h://127.0.0.1:{local_port}"
-                }
-            
-            # Try ip-api over HTTP first (sometimes works, sometimes blocked)
+        if proxy_info and proxy_info[0]:
+            # v7.2: exit IP circuit stage me hi fetch ho gaya tha — wahi reuse, dusri HTTP fetch nahi.
+            proxy_ip = proxy_info[0]
+            proxy_country = proxy_info[1] or "Unknown"
+            print(f"{Colors.OKGREEN}[+] Connected to Proxy: {proxy_country} (IP: {proxy_ip}){Colors.ENDC}")
+        else:
             try:
-                resp = await asyncio.to_thread(requests.get, "http://ip-api.com/json/", proxies=chk_proxies, timeout=15)
-                ip_data = resp.json()
-                if ip_data.get('status') == 'success':
-                    proxy_country = ip_data.get('country', 'Unknown')
-                    proxy_ip = ip_data.get('query', 'Unknown')
-                    print(f"{Colors.OKGREEN}[+] Connected to Proxy: {proxy_country} (IP: {proxy_ip}){Colors.ENDC}")
-            except Exception:
-                # Fallback to ipify over HTTPS if the first one fails or returns HTML
-                resp = await asyncio.to_thread(requests.get, "https://api.ipify.org?format=json", proxies=chk_proxies, timeout=15)
-                ip_data = resp.json()
-                if 'ip' in ip_data:
-                    proxy_ip = ip_data.get('ip', 'Unknown')
-                    print(f"{Colors.OKGREEN}[+] Connected to Proxy: Unknown Country (IP: {proxy_ip}){Colors.ENDC}")
-                else:
-                    print("[-] Could not parse proxy country/IP.")
-                    
-        except Exception as e:
-            print(f"[-] Proxy check failed or timed out: {str(e)[:150]}")
+                import requests
+                chk_proxies = None
+                if local_port:
+                    chk_proxies = {
+                        "http": f"socks5h://127.0.0.1:{local_port}",
+                        "https": f"socks5h://127.0.0.1:{local_port}"
+                    }
+                
+                # Try ip-api over HTTP first (sometimes works, sometimes blocked)
+                try:
+                    resp = await asyncio.to_thread(requests.get, "http://ip-api.com/json/", proxies=chk_proxies, timeout=15)
+                    ip_data = resp.json()
+                    if ip_data.get('status') == 'success':
+                        proxy_country = ip_data.get('country', 'Unknown')
+                        proxy_ip = ip_data.get('query', 'Unknown')
+                        print(f"{Colors.OKGREEN}[+] Connected to Proxy: {proxy_country} (IP: {proxy_ip}){Colors.ENDC}")
+                except Exception:
+                    # Fallback to ipify over HTTPS if the first one fails or returns HTML
+                    resp = await asyncio.to_thread(requests.get, "https://api.ipify.org?format=json", proxies=chk_proxies, timeout=15)
+                    ip_data = resp.json()
+                    if 'ip' in ip_data:
+                        proxy_ip = ip_data.get('ip', 'Unknown')
+                        print(f"{Colors.OKGREEN}[+] Connected to Proxy: Unknown Country (IP: {proxy_ip}){Colors.ENDC}")
+                    else:
+                        print("[-] Could not parse proxy country/IP.")
+                        
+            except Exception as e:
+                print(f"[-] Proxy check failed or timed out: {str(e)[:150]}")
             
 
       
@@ -826,7 +832,7 @@ async def process_account(context, page, email, password, qid=None, local_port=N
                                wait_until="domcontentloaded", timeout=60000, tries=3)
 
         # Wait a moment for page JS and GDPR init_script to kick in
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(1500)
 
         # Fallback: manually dismiss GDPR popup if init_script hasn't fired yet
         try:
@@ -884,7 +890,7 @@ async def process_account(context, page, email, password, qid=None, local_port=N
                 login_outcome = "insta_success"
                 break
                 
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
 
         # STEP 5: Dismiss Popups
         try:
@@ -1360,7 +1366,7 @@ async def start_local_proxy(tor_port, username, password):
 # Dheeme circuit par bhari browser kholne se achha hai 10-20s me tez
 # circuit dhoondh lena — yehi flush ke baad tez chalne ka asli raaz tha
 # (fresh Tor = fresh tez circuits), ab har account par wahi milega.
-CIRCUIT_MAX_S = 12   # seconds: isse slow circuit reject
+CIRCUIT_MAX_S = 5   # seconds: isse slow circuit reject (v7.2: 12 -> 5)
 CIRCUIT_TRIES = 4    # ek account ke liye max kitne circuits try kare
 
 async def _circuit_connect_time(local_port, timeout=12):
@@ -1430,34 +1436,34 @@ async def _ip_seen_and_mark(ip):
     return False
 
 async def _circuit_exit_ip(local_port, timeout=10):
-    """Local proxy se bahar ki asal exit IP. Fail par None (kaam rukega nahi)."""
+    """Local proxy se bahar ki asal exit (IP, country). Fail par (None, None) (kaam rukega nahi)."""
     import requests as _rq
     px = {"http": f"socks5h://127.0.0.1:{local_port}", "https": f"socks5h://127.0.0.1:{local_port}"}
     try:
         resp = await asyncio.to_thread(_rq.get, "http://ip-api.com/json/", proxies=px, timeout=timeout)
         d = resp.json()
         if d.get("status") == "success" and d.get("query"):
-            return d["query"]
+            return d["query"], d.get("country")
     except Exception:
         pass
     try:
         resp = await asyncio.to_thread(_rq.get, "https://api.ipify.org", proxies=px, timeout=timeout)
         ip = (resp.text or "").strip()
         if ip and len(ip) <= 45 and all(c in "0123456789abcdefABCDEF:." for c in ip):
-            return ip
+            return ip, None
     except Exception:
         pass
-    return None
+    return None, None
 
 async def _fast_circuit_proxy():
     """Tez Tor circuit wala local proxy lao; slow mile to naya try.
-    Returns (proxy_server, local_port) — bilkul purane pattern jaisa."""
+    Returns (proxy_server, local_port, exit_ip, country) — exit IP yahin milta hai, proxy_check me dobara fetch nahi hoga."""
     for attempt in range(1, CIRCUIT_TRIES + 1):
         auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
         server, port = await start_local_proxy(TOR_PORT, auth, auth)
         secs = await _circuit_connect_time(port)
         if secs <= CIRCUIT_MAX_S:
-            ip = await _circuit_exit_ip(port)
+            ip, ip_country = await _circuit_exit_ip(port)
             if ip and await _ip_seen_and_mark(ip):
                 print(f"duplicate IP ({ip}) — naya circuit try {attempt}/{CIRCUIT_TRIES}")
                 try:
@@ -1469,7 +1475,7 @@ async def _fast_circuit_proxy():
                 continue
             if attempt > 1:
                 print(f"circuit OK ({secs:.1f}s, try {attempt}/{CIRCUIT_TRIES})")
-            return server, port
+            return server, port, ip, ip_country
         try:
             server.close()
             await asyncio.wait_for(server.wait_closed(), timeout=3)
@@ -1480,10 +1486,10 @@ async def _fast_circuit_proxy():
     print("saare circuits slow mile — aakhri wala hi use kar rahe hain (kaam rukega nahi)")
     auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
     server, port = await start_local_proxy(TOR_PORT, auth, auth)
-    _fb_ip = await _circuit_exit_ip(port)
+    _fb_ip, _fb_country = await _circuit_exit_ip(port)
     if _fb_ip:
         await _ip_seen_and_mark(_fb_ip)
-    return server, port
+    return server, port, _fb_ip, _fb_country
 
 async def run(playwright: Playwright) -> None:
     print(f"[*] Insta Worker {WORKER_VERSION} | {WORKER_ID}: claiming accounts from Redis queue ({re.sub(r'://[^:]*:[^@]+@', '://**:**@', REDIS_URL)}))")
@@ -1528,7 +1534,7 @@ async def run(playwright: Playwright) -> None:
                 ])
             # Circuit gate: slow Tor circuit mile to turant naya lo (neeche _fast_circuit_proxy).
             # Har thread ka apna unique auth = unique Tor circuit = unique IP (pehle jaisa hi).
-            proxy_server, local_port = await _fast_circuit_proxy()
+            proxy_server, local_port, exit_ip, exit_country = await _fast_circuit_proxy()
             tor_proxy = {"server": f"socks5://127.0.0.1:{local_port}"}
 
             MOBILE_USER_AGENTS = [
@@ -1567,10 +1573,10 @@ async def run(playwright: Playwright) -> None:
             bw_stats = await _install_bandwidth_saver(context, page)
 
             # Wait a moment
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
 
             try:
-                await process_account(context, page, email, password, qid, local_port=local_port)
+                await process_account(context, page, email, password, qid, local_port=local_port, proxy_info=(exit_ip, exit_country))
             except TransientError as te:
                 # Bounded retry: transient network failure -> fresh circuit par dobara.
                 # Max 2 requeue = 3 total attempts; uske baad final error.
