@@ -5,7 +5,7 @@ import builtins as _bi
 import contextvars as _cv
 
 # -- Worker version --
-WORKER_VERSION = "v7"
+WORKER_VERSION = "v7.1"
 
 # ── Bulletproof restart helper ──────────────────────────────────────────────
 # os.execv seedha kabhi fail nahi hona chahiye, lekin agar ho bhi jaye to worker
@@ -1397,6 +1397,58 @@ async def _circuit_connect_time(local_port, timeout=12):
     except Exception:
         return float("inf")
 
+# ── IP dedupe: ek hi exit IP baar-baar na mile ───────────────────────────────
+# Circuit milne ke baad account se PEHLE asal exit IP check hoti hai.
+# Local window (is process ke last 100 IP) + Redis global (saare workers,
+# 10 min TTL) — IP repeat mili to circuit reject, naya circuit.
+_RECENT_IP_ORDER = []
+_RECENT_IP_SET = set()
+_RECENT_IP_MAX = 100
+_RECENT_IP_LOCK = None
+
+def _ip_lock():
+    global _RECENT_IP_LOCK
+    if _RECENT_IP_LOCK is None:
+        _RECENT_IP_LOCK = asyncio.Lock()
+    return _RECENT_IP_LOCK
+
+async def _ip_seen_and_mark(ip):
+    """True = ip recent window me pehle se hai (duplicate). Nahi hai to mark karke False."""
+    async with _ip_lock():
+        if ip in _RECENT_IP_SET:
+            return True
+        _RECENT_IP_SET.add(ip)
+        _RECENT_IP_ORDER.append(ip)
+        while len(_RECENT_IP_ORDER) > _RECENT_IP_MAX:
+            _RECENT_IP_SET.discard(_RECENT_IP_ORDER.pop(0))
+    try:
+        ok = _r().set("recent_ip:" + ip, WORKER_ID, nx=True, ex=600)
+        if not ok:
+            return True
+    except Exception:
+        pass
+    return False
+
+async def _circuit_exit_ip(local_port, timeout=10):
+    """Local proxy se bahar ki asal exit IP. Fail par None (kaam rukega nahi)."""
+    import requests as _rq
+    px = {"http": f"socks5h://127.0.0.1:{local_port}", "https": f"socks5h://127.0.0.1:{local_port}"}
+    try:
+        resp = await asyncio.to_thread(_rq.get, "http://ip-api.com/json/", proxies=px, timeout=timeout)
+        d = resp.json()
+        if d.get("status") == "success" and d.get("query"):
+            return d["query"]
+    except Exception:
+        pass
+    try:
+        resp = await asyncio.to_thread(_rq.get, "https://api.ipify.org", proxies=px, timeout=timeout)
+        ip = (resp.text or "").strip()
+        if ip and len(ip) <= 45 and all(c in "0123456789abcdefABCDEF:." for c in ip):
+            return ip
+    except Exception:
+        pass
+    return None
+
 async def _fast_circuit_proxy():
     """Tez Tor circuit wala local proxy lao; slow mile to naya try.
     Returns (proxy_server, local_port) — bilkul purane pattern jaisa."""
@@ -1405,6 +1457,16 @@ async def _fast_circuit_proxy():
         server, port = await start_local_proxy(TOR_PORT, auth, auth)
         secs = await _circuit_connect_time(port)
         if secs <= CIRCUIT_MAX_S:
+            ip = await _circuit_exit_ip(port)
+            if ip and await _ip_seen_and_mark(ip):
+                print(f"duplicate IP ({ip}) — naya circuit try {attempt}/{CIRCUIT_TRIES}")
+                try:
+                    server.close()
+                    await asyncio.wait_for(server.wait_closed(), timeout=3)
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+                continue
             if attempt > 1:
                 print(f"circuit OK ({secs:.1f}s, try {attempt}/{CIRCUIT_TRIES})")
             return server, port
@@ -1417,7 +1479,11 @@ async def _fast_circuit_proxy():
         await asyncio.sleep(1)
     print("saare circuits slow mile — aakhri wala hi use kar rahe hain (kaam rukega nahi)")
     auth = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-    return await start_local_proxy(TOR_PORT, auth, auth)
+    server, port = await start_local_proxy(TOR_PORT, auth, auth)
+    _fb_ip = await _circuit_exit_ip(port)
+    if _fb_ip:
+        await _ip_seen_and_mark(_fb_ip)
+    return server, port
 
 async def run(playwright: Playwright) -> None:
     print(f"[*] Insta Worker {WORKER_VERSION} | {WORKER_ID}: claiming accounts from Redis queue ({re.sub(r'://[^:]*:[^@]+@', '://**:**@', REDIS_URL)}))")
