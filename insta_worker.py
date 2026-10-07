@@ -5,7 +5,7 @@ import builtins as _bi
 import contextvars as _cv
 
 # -- Worker version --
-WORKER_VERSION = "v7.2"
+WORKER_VERSION = "v7.3"
 
 # ── Bulletproof restart helper ──────────────────────────────────────────────
 # os.execv seedha kabhi fail nahi hona chahiye, lekin agar ho bhi jaye to worker
@@ -415,6 +415,7 @@ def claim_one():
                     item = json.loads(raw)
                     # done_qids guard (reclaim-race protection)
                     if rc.sismember("queue:done_qids", item.get("qid", "")):
+                        print(f"{Colors.WARNING}[GUARD] {item.get('email', '?')}: qid done_qids me hai — payload discard, dobara process nahi hoga.{Colors.ENDC}")
                         rc.lrem(PROC_KEY, 1, raw)
                         return None
                     return (raw, item)
@@ -450,12 +451,17 @@ def claim_one():
     time.sleep(5) # wait if queue is empty so we don't spin fast
     return None
 
-def ack_claim(raw):
-    """Remove from processing list, mark qid as done."""
+def ack_claim(raw, mark_done=True):
+    """Remove from processing list; mark_done=True par hi qid done_qids me jayega.
+    Transient requeue / renew-return par mark_done=False — account wapas queue
+    me gaya hai, process NAHI hua, isliye qid done-set me nahi jana chahiye
+    (warna agli claim par guard use silent discard kar dega — black hole)."""
     import json
     try:
         rc = _r()
         rc.lrem(PROC_KEY, 1, raw)
+        if not mark_done:
+            return
         try:
             item = json.loads(raw)
             qid = item.get("qid")
@@ -1575,6 +1581,7 @@ async def run(playwright: Playwright) -> None:
             # Wait a moment
             await page.wait_for_timeout(1000)
 
+            requeued = False  # transient requeue hua to finally me done mark nahi hoga
             try:
                 await process_account(context, page, email, password, qid, local_port=local_port, proxy_info=(exit_ip, exit_country))
             except TransientError as te:
@@ -1590,6 +1597,7 @@ async def run(playwright: Playwright) -> None:
                         try: rc.sadd("queue:emails", item.get("email", ""))
                         except: pass
                         print(f"{Colors.WARNING}[RETRY] {email}: requeued to Redis, attempt {retries+2}/3{Colors.ENDC}")
+                        requeued = True
                     except Exception as re:
                         print(f"[-] requeue failed: {re}")
                         raise Exception(f"Transient failure, requeue failed: {te}")
@@ -1600,7 +1608,7 @@ async def run(playwright: Playwright) -> None:
                 _print_bandwidth_report(email, bw_stats)
 
         finally:
-            ack_claim(raw)  # release the Redis claim whatever happened
+            ack_claim(raw, mark_done=not requeued)  # release claim; requeue hua to done mark NAHI (black-hole fix)
             # Clean up context and user data directory
             try:
                 await context.close()
@@ -1673,7 +1681,7 @@ async def run(playwright: Playwright) -> None:
                     _r().lpush("queue:pending", raw)
                 except Exception:
                     pass
-                ack_claim(raw)
+                ack_claim(raw, mark_done=False)
                 print(f"[*] {tag}: renew flagged — claimed account wapas queue me daal diya, exiting.")
                 return
             idle_rounds = 0
